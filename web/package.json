@@ -1,0 +1,30 @@
+{
+  "name": "xgc2-lan-panel-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 3401",
+    "build": "tsc -p tsconfig.app.json --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 3401",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.app.json --pretty false"
+  },
+  "dependencies": {
+    "@xgc2/ui-react": "https://github.com/XGC-Team/xgc2-ui/releases/download/v0.15.6/xgc2-ui-react-0.15.6.tgz",
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.1",
+    "jsdom": "^29.1.1",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.6",
+    "vitest": "^4.1.6"
+  }
+}

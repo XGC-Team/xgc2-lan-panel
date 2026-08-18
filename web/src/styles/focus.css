@@ -1,0 +1,44 @@
+/*
+ * Final keyboard-focus contract. This file is deliberately unlayered so route
+ * styles cannot erase the application focus indicator with route-level resets.
+ */
+:is(body, #root) :where(
+  button,
+  a[href],
+  input,
+  select,
+  textarea,
+  summary,
+  [role="button"],
+  [role="link"],
+  [role="option"],
+  [role="tab"],
+  [tabindex]:not([tabindex="-1"])
+):focus-visible {
+  border-color: transparent;
+  outline: var(--stroke-strong) solid var(--color-border-focus);
+  outline-offset: 0;
+  box-shadow: none;
+}
+
+:is(body, #root) :where(
+  .xgc-input,
+  .xgc-input-control,
+  .xgc-textarea-control,
+  .xgc-select-control
+):has(:focus-visible) {
+  border-color: transparent;
+  outline: var(--stroke-strong) solid var(--color-border-focus);
+  outline-offset: 0;
+  box-shadow: none;
+}
+
+:is(body, #root) :where(
+  .xgc-input > input,
+  .xgc-input-control > input,
+  .xgc-textarea-control > textarea,
+  .xgc-select-control .xgc-select-trigger
+):focus-visible {
+  outline: 0;
+  box-shadow: none;
+}

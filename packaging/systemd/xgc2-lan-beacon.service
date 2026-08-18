@@ -1,0 +1,13 @@
+[Unit]
+Description=XGC2 LAN Panel beacon (robot-side)
+After=NetworkManager.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/xgc2-lan-beacon
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

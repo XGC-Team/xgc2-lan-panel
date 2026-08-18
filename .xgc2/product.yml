@@ -1,0 +1,52 @@
+schema: xgc2.product.v1
+id: xgc2-lan-panel
+name: XGC2 LAN Panel
+version: 0.1.0-1
+kind: toolchain-apt
+summary: Field LAN robot finder. Beacon is discovered on the robot; probe discovers
+  from the operator laptop. Independent of Core / Agent.
+groups:
+- utils
+apt:
+  distribution: bionic,focal,jammy,noble
+  install:
+  - xgc2-lan-probe
+  packages:
+  - xgc2-lan-probe
+  - xgc2-lan-beacon
+  package_architectures:
+    xgc2-lan-probe:
+    - amd64
+    - arm64
+    xgc2-lan-beacon:
+    - amd64
+    - arm64
+usage:
+  install: |
+    sudo apt update
+    sudo apt install xgc2-lan-probe
+    sudo apt install xgc2-lan-beacon
+  smoke_test: |
+    xgc2-lan-probe --version
+    xgc2-lan-beacon --version
+  notes: |
+    Two Debian packages from one source. xgc2-lan-beacon runs on the robot
+    (UDP 19518, TCP 19519, systemd). xgc2-lan-probe runs on the operator
+    laptop (UI+API on 127.0.0.1:3400). Beacon apply needs NetworkManager
+    (nmcli); it is a Recommends, not a hard Depends of the probe install set.
+    This product has no XGC2 Core / Agent / ROS dependency.
+ownership:
+  paths:
+  - /usr/bin/xgc2-lan-probe
+  - /usr/bin/xgc2-lan-beacon
+  - /lib/systemd/system/xgc2-lan-beacon.service
+release:
+  repository: XGC-Team/xgc2-lan-panel
+  ref: main
+  workflow: release.yml
+  ci_workflow: ci.yml
+  apt_versions:
+    bionic: 0.1.0-1~bionic
+    focal: 0.1.0-1~focal
+    jammy: 0.1.0-1~jammy
+    noble: 0.1.0-1~noble

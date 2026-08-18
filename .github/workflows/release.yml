@@ -1,0 +1,294 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_version:
+        description: Expected .xgc2/product.yml version
+        required: true
+        type: string
+      expected_source_sha:
+        description: Expected source commit SHA
+        required: true
+        type: string
+      prepare_action:
+        description: Release-train action
+        required: true
+        type: choice
+        options: [release, compatibility-verify]
+      apt_overlay_url:
+        description: Optional release-scoped staging APT base URL
+        required: false
+        default: ""
+        type: string
+      dependency_set_digest:
+        description: SHA256 of the resolved release-train dependency set
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  XGC2_APT_OVERLAY_URL: ${{ inputs.apt_overlay_url }}
+  XGC2_DEPENDENCY_SET_DIGEST: ${{ inputs.dependency_set_digest }}
+
+jobs:
+  prepare-contract:
+    name: Validate prepare contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate release-train inputs
+        env:
+          PREPARE_ACTION: ${{ inputs.prepare_action }}
+          APT_OVERLAY_URL: ${{ inputs.apt_overlay_url }}
+          DEPENDENCY_SET_DIGEST: ${{ inputs.dependency_set_digest }}
+        run: |
+          set -euo pipefail
+          case "${PREPARE_ACTION}" in
+            release|compatibility-verify) ;;
+            *)
+              echo "unsupported prepare_action: ${PREPARE_ACTION}" >&2
+              exit 1
+              ;;
+          esac
+          if [[ "${DEPENDENCY_SET_DIGEST}" != \
+                "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945" ]]; then
+            echo "dependency_set_digest must identify the empty dependency set" >&2
+            exit 1
+          fi
+          if [[ -n "${APT_OVERLAY_URL}" ]]; then
+            echo "LAN Panel has no APT dependencies and forbids apt_overlay_url" >&2
+            exit 1
+          fi
+
+  release-guard:
+    name: Validate immutable release inputs
+    needs: prepare-contract
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Validate version and source
+        run: |
+          set -euo pipefail
+          product_version="$(awk -F': *' '/^version:/ {print $2; exit}' .xgc2/product.yml)"
+          test "${product_version}" = "${{ inputs.expected_version }}"
+          test "$(git rev-parse HEAD)" = "${{ inputs.expected_source_sha }}"
+
+  package-compliance:
+    name: Package compliance
+    needs: release-guard
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Check package contract in the XGC2 noble image
+        run: |
+          set -euo pipefail
+          git diff --check HEAD
+          image=ghcr.io/xgc-team/xgc2-images/xgc2-build-noble-dev:1.0.0
+          docker pull "${image}"
+          docker run --rm \
+            --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            -v "${GITHUB_WORKSPACE}:/work" -w /work \
+            "${image}" \
+            bash -lc '
+              set -euo pipefail
+              git config --global --add safe.directory /work
+              ./.xgc2/scripts/check_package_compliance.sh
+            '
+
+  source-tests:
+    needs: release-guard
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Run quality gates in the XGC2 noble image
+        run: |
+          set -euo pipefail
+          image=ghcr.io/xgc-team/xgc2-images/xgc2-build-noble-dev:1.0.0
+          docker pull "${image}"
+          docker run --rm \
+            --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            -v "${GITHUB_WORKSPACE}:/work" -w /work \
+            "${image}" \
+            bash -lc '
+              set -euo pipefail
+              git config --global --add safe.directory /work
+              npm --prefix web ci
+              npm --prefix web test
+              test -z "$(gofmt -l cmd internal)"
+              go vet ./...
+              go test ./...
+              ./.xgc2/scripts/build.sh
+            '
+
+  deb-build-and-smoke:
+    name: Debian ${{ matrix.distribution }} ${{ matrix.architecture }}
+    needs: release-guard
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distribution: bionic
+            image: ghcr.io/xgc-team/xgc2-images/xgc2-build-bionic-dev:1.0.0
+            architecture: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - distribution: bionic
+            image: ghcr.io/xgc-team/xgc2-images/xgc2-build-bionic-dev:1.0.0
+            architecture: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+          - distribution: focal
+            image: ghcr.io/xgc-team/xgc2-images/xgc2-build-focal-dev:1.0.0
+            architecture: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - distribution: focal
+            image: ghcr.io/xgc-team/xgc2-images/xgc2-build-focal-dev:1.0.0
+            architecture: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+          - distribution: jammy
+            image: ghcr.io/xgc-team/xgc2-images/xgc2-build-jammy-dev:1.0.0
+            architecture: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - distribution: jammy
+            image: ghcr.io/xgc-team/xgc2-images/xgc2-build-jammy-dev:1.0.0
+            architecture: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+          - distribution: noble
+            image: ghcr.io/xgc-team/xgc2-images/xgc2-build-noble-dev:1.0.0
+            architecture: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - distribution: noble
+            image: ghcr.io/xgc-team/xgc2-images/xgc2-build-noble-dev:1.0.0
+            architecture: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Prepare host CI directories
+        run: |
+          install -d "$GITHUB_WORKSPACE/.ci/build-manifests"
+
+      - name: Build UI in noble-dev for bionic
+        if: matrix.distribution == 'bionic'
+        run: |
+          set -euo pipefail
+          image=ghcr.io/xgc-team/xgc2-images/xgc2-build-noble-dev:1.0.0
+          docker pull "${image}"
+          docker run --rm \
+            --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            -v "${GITHUB_WORKSPACE}:/work" -w /work \
+            "${image}" \
+            bash -lc '
+              set -euo pipefail
+              git config --global --add safe.directory /work
+              npm --prefix web ci
+              npm --prefix web run build
+              rm -rf cmd/xgc2-lan-panel/ui
+              mkdir -p cmd/xgc2-lan-panel/ui
+              cp -a web/dist/. cmd/xgc2-lan-panel/ui/
+            '
+
+      - name: Build debs in the XGC2 image
+        env:
+          PACKAGE_DISTRIBUTION: ${{ matrix.distribution }}
+        run: |
+          set -euo pipefail
+          test "$(dpkg --print-architecture)" = "${{ matrix.architecture }}"
+          docker pull "${{ matrix.image }}"
+          docker run --rm \
+            --platform "${{ matrix.platform }}" \
+            --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            -e PACKAGE_DISTRIBUTION \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            "${{ matrix.image }}" \
+            bash -lc '
+              set -euo pipefail
+              git config --global --add safe.directory /work
+              for pkg in curl dpkg-dev fakeroot file ca-certificates; do
+                dpkg -s "${pkg}" >/dev/null
+              done
+              ./.xgc2/scripts/build_deb.sh
+            '
+
+      - name: Install debs and smoke-test as root
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --platform "${{ matrix.platform }}" \
+            -v "${GITHUB_WORKSPACE}:/work:ro" \
+            -w /work \
+            "${{ matrix.image }}" \
+            bash -lc '
+              set -euo pipefail
+              dpkg -i ./debs/xgc2-lan-probe_*.deb ./debs/xgc2-lan-beacon_*.deb
+              ./.xgc2/scripts/smoke_test_installed.sh
+            '
+
+      - name: Create release-train build manifest
+        run: |
+          set -euo pipefail
+          python3 .xgc2/scripts/xgc2_artifact_manifest.py build \
+            --deb-dir debs \
+            --output-dir .ci/build-manifests \
+            --product xgc2-lan-panel \
+            --product-version "${{ inputs.expected_version }}" \
+            --distribution "${{ matrix.distribution }}" \
+            --architecture "${{ matrix.architecture }}" \
+            --source-sha "${{ inputs.expected_source_sha }}" \
+            --ci-run-id "${GITHUB_RUN_ID}" \
+            --ci-workflow "${GITHUB_WORKFLOW}" \
+            --ci-workflow-ref "${GITHUB_WORKFLOW_REF}"
+          python3 .xgc2/scripts/xgc2_artifact_manifest.py verify-build \
+            --artifact-dir . \
+            --deb-output-dir .ci/verified-debs \
+            --manifest-output-dir .ci/verified-manifests \
+            --product xgc2-lan-panel \
+            --product-version "${{ inputs.expected_version }}" \
+            --distribution "${{ matrix.distribution }}" \
+            --architecture "${{ matrix.architecture }}" \
+            --source-sha "${{ inputs.expected_source_sha }}" \
+            --ci-run-id "${GITHUB_RUN_ID}"
+
+      - name: Upload trusted deb artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: xgc2-lan-panel-${{ matrix.distribution }}-${{ matrix.architecture }}
+          path: |
+            debs/*.deb
+            .ci/build-manifests/*.json
+          retention-days: 14
+          include-hidden-files: true

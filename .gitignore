@@ -1,0 +1,11 @@
+/bin/
+/debs/
+/.ci/
+__pycache__/
+*.pyc
+/web/node_modules/
+/web/dist/
+/web/tsconfig.app.tsbuildinfo
+/cmd/xgc2-lan-panel/ui/**
+!/cmd/xgc2-lan-panel/ui/.gitkeep
+*.test

@@ -1,0 +1,14 @@
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+.xgc-app-content {
+  scrollbar-gutter: auto;
+}
+
+.lan-iface-default-action {
+  min-width: 7.5em;
+}
