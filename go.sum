@@ -1,2 +1,6 @@
-golang.org/x/sys v0.34.0 h1:H5Y5sJ2L2JRdyv7ROF1he/lPdvFsd0mJHFw2ThKHxLA=
-golang.org/x/sys v0.34.0/go.mod h1:BJP2sWEmIv4KK5OTEluFJCKSidICx8ciO85XgH3Ak8k=
+github.com/XGC-Team/xgc2-xrpc/go v0.0.0-20261008183413-35c23b558399 h1:zww4QE18mlJIhNKVn3CWJyqwGBAa9o5CLA1F0LTT7vw=
+github.com/XGC-Team/xgc2-xrpc/go v0.0.0-20261008183413-35c23b558399/go.mod h1:SbR8WMLhRLqW77NAaSD1tKKpPxT1SQavGU2ciCTF74A=
+golang.org/x/net v0.46.1-0.20251013234738-63d1a5100f82 h1:6/3JGEh1C88g7m+qzzTbl3A0FtsLguXieqofVLU/JAo=
+golang.org/x/net v0.46.1-0.20251013234738-63d1a5100f82/go.mod h1:Q9BGdFy1y4nkUwiLvT5qtyhAnEHgnQ/zd8PfU6nc210=
+golang.org/x/sys v0.37.0 h1:fdNQudmxPjkdUTPnLn5mdQv7Zwvbvpaxqs831goi9kQ=
+golang.org/x/sys v0.37.0/go.mod h1:OgkHotnGiDImocRcuBABYBEXf8A9a87e/uXjp9XT3ks=

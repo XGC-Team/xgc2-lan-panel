@@ -3,15 +3,19 @@ package netinfo
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/XGC-Team/xgc2-lan-panel/internal/protocol"
@@ -19,28 +23,35 @@ import (
 
 // Host is the OS surface Collect reads. Tests inject fakes.
 type Host struct {
-	ReadFile       func(string) ([]byte, error)
-	ReadDir        func(string) ([]os.DirEntry, error)
-	Stat           func(string) (os.FileInfo, error)
-	Hostname       func() (string, error)
-	Interfaces     func() ([]net.Interface, error)
-	CombinedOutput func(name string, args ...string) ([]byte, error)
+	ReadFile   func(string) ([]byte, error)
+	ReadDir    func(string) ([]os.DirEntry, error)
+	Stat       func(string) (os.FileInfo, error)
+	Hostname   func() (string, error)
+	Interfaces func() ([]net.Interface, error)
+	Command    func(context.Context, string, ...string) ([]byte, error)
 }
 
 func DefaultHost() Host {
 	return Host{
-		ReadFile:   os.ReadFile,
+		ReadFile:   boundedReadFile,
 		ReadDir:    os.ReadDir,
 		Stat:       os.Stat,
 		Hostname:   os.Hostname,
 		Interfaces: net.Interfaces,
-		CombinedOutput: func(name string, args ...string) ([]byte, error) {
-			return exec.Command(name, args...).CombinedOutput()
-		},
+		Command:    RunCommand,
 	}
 }
 
 func Collect(h Host) (protocol.Beacon, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return CollectContext(ctx, h)
+}
+
+func CollectContext(ctx context.Context, h Host) (protocol.Beacon, error) {
+	if err := ctx.Err(); err != nil {
+		return protocol.Beacon{}, err
+	}
 	if h.ReadFile == nil {
 		h = DefaultHost()
 	}
@@ -59,8 +70,14 @@ func Collect(h Host) (protocol.Beacon, error) {
 	if err != nil {
 		return protocol.Beacon{}, err
 	}
+	if len(ifaces) > 64 {
+		return protocol.Beacon{}, errors.New("interface count exceeds snapshot budget")
+	}
 	var out []protocol.Iface
 	for _, ni := range ifaces {
+		if err := ctx.Err(); err != nil {
+			return protocol.Beacon{}, err
+		}
 		if skipIface(ni.Name) {
 			continue
 		}
@@ -86,7 +103,7 @@ func Collect(h Host) (protocol.Beacon, error) {
 			row.IsDefault = r.Default
 		}
 		if row.Kind == "wifi" {
-			row.SSID, row.SignalDbm = wifiOn(h, ni.Name)
+			row.SSID, row.SignalDbm = wifiOn(ctx, h, ni.Name)
 		}
 		if row.Kind == "other" {
 			continue
@@ -100,6 +117,9 @@ func Collect(h Host) (protocol.Beacon, error) {
 			def = row.Name
 			bestMetric = row.Metric
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return protocol.Beacon{}, err
 	}
 	ssh := ""
 	if len(users) > 0 {
@@ -340,28 +360,28 @@ func ifaceKind(h Host, name string) string {
 	return "other"
 }
 
-func wifiOn(h Host, name string) (string, *int) {
-	if h.CombinedOutput == nil {
+func wifiOn(ctx context.Context, h Host, name string) (string, *int) {
+	if h.Command == nil {
 		return "", nil
 	}
-	if out, err := h.CombinedOutput("iw", "dev", name, "link"); err == nil {
+	if out, err := h.Command(ctx, "iw", "dev", name, "link"); err == nil {
 		ssid, dbm := ParseIWLink(out)
 		if ssid != "" {
 			return ssid, dbm
 		}
 	}
-	if out, err := h.CombinedOutput("iwgetid", "-r", name); err == nil {
+	if out, err := h.Command(ctx, "iwgetid", "-r", name); err == nil {
 		ssid := strings.TrimSpace(string(out))
 		if ssid != "" {
 			return ssid, nil
 		}
 	}
-	if out, err := h.CombinedOutput("nmcli", "-t", "-f", "GENERAL.CONNECTION", "device", "show", name); err == nil {
+	if out, err := h.Command(ctx, "nmcli", "-t", "-f", "GENERAL.CONNECTION", "device", "show", name); err == nil {
 		conn := strings.TrimSpace(string(out))
 		conn = strings.TrimPrefix(conn, "GENERAL.CONNECTION:")
 		conn = strings.TrimSpace(conn)
 		if conn != "" && conn != "--" {
-			if ssidOut, err := h.CombinedOutput("nmcli", "-t", "-f", "802-11-wireless.ssid", "connection", "show", conn); err == nil {
+			if ssidOut, err := h.Command(ctx, "nmcli", "-t", "-f", "802-11-wireless.ssid", "connection", "show", conn); err == nil {
 				ssid := strings.TrimSpace(string(ssidOut))
 				ssid = strings.TrimPrefix(ssid, "802-11-wireless.ssid:")
 				ssid = strings.TrimSpace(ssid)
@@ -397,4 +417,56 @@ func readFile(h Host, path string) []byte {
 		return nil
 	}
 	return b
+}
+
+// Native command work is finite and fully joined; overflow never becomes a
+// successful partial parser input.
+const MaxNativeOutput = 64 << 10
+
+type boundedOutput struct {
+	buffer   bytes.Buffer
+	overflow bool
+}
+
+func (b *boundedOutput) Write(raw []byte) (int, error) {
+	n := len(raw)
+	remaining := MaxNativeOutput - b.buffer.Len()
+	if len(raw) > remaining {
+		b.overflow = true
+		raw = raw[:remaining]
+	}
+	_, _ = b.buffer.Write(raw)
+	return n, nil
+}
+func RunCommand(parent context.Context, name string, args ...string) ([]byte, error) {
+	return RunCommandBounded(parent, 2*time.Second, name, args...)
+}
+func RunCommandBounded(parent context.Context, timeout time.Duration, name string, args ...string) ([]byte, error) {
+	if err := parent.Err(); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	command := exec.CommandContext(ctx, name, args...)
+	var output boundedOutput
+	command.Stdout = &output
+	command.Stderr = &output
+	command.WaitDelay = time.Second
+	err := command.Run()
+	if err == nil && output.overflow {
+		err = errors.New("native output exceeds byte budget")
+	}
+	return output.buffer.Bytes(), err
+}
+func boundedReadFile(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, MaxNativeOutput+1))
+	if len(raw) > MaxNativeOutput {
+		return nil, errors.New("host snapshot input exceeds byte budget")
+	}
+	return raw, err
 }

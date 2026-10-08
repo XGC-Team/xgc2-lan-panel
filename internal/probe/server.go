@@ -2,27 +2,40 @@ package probe
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log"
+	"mime"
 	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"strconv"
-	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/XGC-Team/xgc2-lan-panel/internal/controltls"
 	"github.com/XGC-Team/xgc2-lan-panel/internal/protocol"
+	"github.com/XGC-Team/xgc2-lan-panel/internal/runtimepolicy"
+	xrpc "github.com/XGC-Team/xgc2-xrpc/go"
+	"github.com/XGC-Team/xgc2-xrpc/go/httpx"
 	"golang.org/x/sys/unix"
 )
 
 type Options struct {
-	Listen  string
-	UDPAddr string
-	UI      fs.FS
-	Client  *http.Client
-	Now     func() time.Time
+	Listen       string
+	UDPAddr      string
+	UI           fs.FS
+	TLSConfig    *tls.Config
+	TargetGrants controltls.TargetGrants
+	Now          func() time.Time
 }
 
 func Run(ctx context.Context, opt Options) error {
@@ -37,11 +50,41 @@ func Run(ctx context.Context, opt Options) error {
 	if opt.Now == nil {
 		opt.Now = time.Now
 	}
-	if opt.Client == nil {
-		opt.Client = &http.Client{Timeout: 45 * time.Second}
+	if !loopbackAuthority(opt.Listen) {
+		return errors.New("LAN probe must listen on a numeric loopback address or localhost")
+	}
+	if len(opt.TargetGrants) < 1 || len(opt.TargetGrants) > 64 {
+		return errors.New("bounded deployment LAN target grants required")
+	}
+	if opt.TLSConfig == nil || opt.TLSConfig.InsecureSkipVerify || len(opt.TLSConfig.Certificates) != 1 || opt.TLSConfig.RootCAs == nil {
+		return errors.New("authenticated LAN client identity and trust bundle required")
+	}
+	policy, err := runtimepolicy.Resolve(os.Environ(), "probe")
+	if err != nil {
+		return err
+	}
+	hostOptions, err := (httpx.HostOptions{}).WithPolicy(policy)
+	if err != nil {
+		return err
 	}
 	reg := NewRegistry(opt.Now)
 	hub := NewHub()
+	clientConfig, err := (httpx.Config{LocalTargetID: "lan-probe", MaxInFlight: 8,
+		TLSForService: func(ref xrpc.ServiceRef) (*tls.Config, error) {
+			return opt.TargetGrants.TLSForService(opt.TLSConfig, ref)
+		},
+		DialContext: func(ctx context.Context, ref xrpc.ServiceRef) (net.Conn, error) {
+			row, ok := reg.TakeFresh(ref.TargetID)
+			if !ok || row.Beacon.ControlInstance != ref.InstanceID {
+				return nil, errors.New("LAN service reference expired")
+			}
+			return (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(row.ReachIP, strconv.Itoa(row.Beacon.ControlPort)))
+		}}).WithPolicy(policy)
+	if err != nil {
+		return err
+	}
+	profile := httpx.NewProfile(clientConfig)
+	defer profile.Close()
 	publish := func() {
 		raw, err := json.Marshal(reg.List())
 		if err != nil {
@@ -56,11 +99,16 @@ func Run(ctx context.Context, opt Options) error {
 	}
 	defer pc.Close()
 
-	go readBeacons(ctx, pc, reg, hub, publish)
-	go staleTicker(ctx, hub, publish)
-	go solicitLoop(ctx, pc, hub)
+	workCtx, cancelWork := context.WithCancel(ctx)
+	var workers sync.WaitGroup
+	workers.Add(3)
+	go func() { defer workers.Done(); readBeacons(workCtx, pc, reg, hub, publish) }()
+	go func() { defer workers.Done(); staleTicker(workCtx, hub, publish) }()
+	go func() { defer workers.Done(); solicitLoop(workCtx, pc, hub) }()
+	defer func() { cancelWork(); pc.Close(); workers.Wait() }()
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/runtime-policy", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, policy.Effective()) })
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, map[string]any{
 			"ok":         true,
@@ -86,30 +134,53 @@ func Run(ctx context.Context, opt Options) error {
 			})
 			return
 		}
-		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
-		if err != nil {
-			http.Error(w, "read body", http.StatusBadRequest)
+		grant, allowed := opt.TargetGrants[id]
+		if !allowed || grant.ServerName != row.Beacon.ControlName {
+			http.Error(w, "robot discovery has no matching control authorization", 403)
 			return
 		}
-		url := "http://" + net.JoinHostPort(row.ReachIP, strconv.Itoa(row.Beacon.ControlPort)) + "/v1/apply"
-		req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, strings.NewReader(string(body)))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		body, err := io.ReadAll(io.LimitReader(r.Body, (1<<16)+1))
+		if err != nil || len(body) > 1<<16 {
+			http.Error(w, "command exceeds byte budget", 413)
 			return
 		}
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := opt.Client.Do(req)
-		if err != nil {
-			writeJSONStatus(w, http.StatusBadGateway, protocol.ApplyResult{
-				Message: err.Error(),
-				Warning: "the robot may be switching networks; wait for it to reappear",
-			})
+		if !json.Valid(body) {
+			http.Error(w, "invalid command JSON", 400)
 			return
 		}
-		defer resp.Body.Close()
+		var identity [16]byte
+		if _, err = rand.Read(identity[:]); err != nil {
+			http.Error(w, "request identity unavailable", 500)
+			return
+		}
+		ref := xrpc.ServiceRef{TargetID: row.Beacon.ID, Service: "xgc2.lan.v1.Beacon", APIVersion: "2", InstanceID: row.Beacon.ControlInstance, Profile: xrpc.HTTP, Endpoint: xrpc.Endpoint{Kind: "https", Address: "https://" + net.JoinHostPort(row.Beacon.ControlName, strconv.Itoa(row.Beacon.ControlPort))}}
+		callCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		result, err := profile.Call(callCtx, xrpc.Call{Service: ref, Method: http.MethodPost, Path: "/v1/apply", RequestID: hex.EncodeToString(identity[:]), Payload: body})
+		if err != nil {
+			code := xrpc.Code(err)
+			status := http.StatusBadGateway
+			switch code {
+			case "invalid_argument":
+				status = 400
+			case "resource_exhausted":
+				status = 429
+			case "conflict":
+				status = 409
+			case "deadline_exceeded":
+				status = 504
+			}
+			disposition := xrpc.NotSent
+			var failure *xrpc.CallError
+			if errors.As(err, &failure) {
+				disposition = failure.Disposition
+			}
+			writeJSONStatus(w, status, map[string]any{"ok": false, "message": fmt.Sprintf("LAN control failed: %s", code), "warning": "the robot may be switching networks; rediscover before any new command", "disposition": disposition})
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
+		w.WriteHeader(result.Status)
+		_, _ = w.Write(result.Payload)
 	})
 	if opt.UI != nil {
 		fileServer := http.FileServer(http.FS(opt.UI))
@@ -121,19 +192,8 @@ func Run(ctx context.Context, opt Options) error {
 		})
 	}
 
-	srv := &http.Server{Addr: opt.Listen, Handler: withCORS(mux)}
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
-	}()
 	log.Printf("probe ui/api on http://%s  (solicit %s → :%d)", opt.Listen, pc.LocalAddr(), protocol.UDPPort)
-	err = srv.ListenAndServe()
-	if err == http.ErrServerClosed {
-		return nil
-	}
-	return err
+	return httpx.RunEdge(ctx, opt.Listen, withCORS(mux), hostOptions)
 }
 
 func readBeacons(ctx context.Context, pc net.PacketConn, reg *Registry, hub *Hub, publish func()) {
@@ -220,6 +280,7 @@ func serveWatch(w http.ResponseWriter, r *http.Request, hub *Hub, publish func()
 }
 
 func writeSSE(w http.ResponseWriter, flusher http.Flusher, event string, payload []byte) {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(5 * time.Second))
 	_, _ = io.WriteString(w, "event: "+event+"\n")
 	_, _ = io.WriteString(w, "data: ")
 	_, _ = w.Write(payload)
@@ -248,12 +309,31 @@ func listenUDP(addr string) (net.PacketConn, error) {
 
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !loopbackAuthority(r.Host) {
+			http.Error(w, "loopback Host required", 403)
+			return
+		}
 		origin := r.Header.Get("Origin")
-		if origin == "http://127.0.0.1:3401" || origin == "http://localhost:3401" {
+		allowed := origin == ""
+		if parsed, err := url.Parse(origin); err == nil && parsed.Scheme == "http" && parsed.User == nil && parsed.Path == "" && parsed.RawQuery == "" && parsed.Fragment == "" && loopbackAuthority(parsed.Host) {
+			allowed = parsed.Host == r.Host || origin == "http://127.0.0.1:3401" || origin == "http://localhost:3401"
+		}
+		if !allowed {
+			http.Error(w, "browser origin has no LAN control authorization", 403)
+			return
+		}
+		if origin != "" {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
 			w.Header().Set("Cache-Control", "no-cache")
+		}
+		if r.Method == http.MethodPost {
+			contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+			if err != nil || contentType != "application/json" {
+				http.Error(w, "application/json required", 415)
+				return
+			}
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -261,6 +341,18 @@ func withCORS(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func loopbackAuthority(authority string) bool {
+	host, _, err := net.SplitHostPort(authority)
+	if err != nil || host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

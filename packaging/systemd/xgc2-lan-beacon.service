@@ -5,8 +5,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+EnvironmentFile=/etc/xgc2/lan-beacon.env
 ExecStart=/usr/bin/xgc2-lan-beacon
-Restart=always
+Restart=on-failure
+RestartPreventExitStatus=2
 RestartSec=2
 
 [Install]

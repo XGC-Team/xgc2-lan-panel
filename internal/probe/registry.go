@@ -34,6 +34,10 @@ func NewRegistry(now func() time.Time) *Registry {
 func (r *Registry) Observe(src string, b protocol.Beacon) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.expireLocked()
+	if _, exists := r.byID[b.ID]; !exists && len(r.byID) >= 64 {
+		return
+	}
 	prev := r.byID[b.ID].ReachIP
 	r.byID[b.ID] = Robot{
 		Beacon:   b,

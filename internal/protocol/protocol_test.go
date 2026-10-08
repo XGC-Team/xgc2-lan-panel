@@ -7,7 +7,8 @@ import (
 
 func TestMarshalParseRoundTrip(t *testing.T) {
 	in := Beacon{
-		ID:           "abc123",
+		ID:          "abc123",
+		ControlName: "robot.example", ControlInstance: "boot",
 		Hostname:     "xavier",
 		TSUnixMS:     1,
 		DefaultIface: "wlan1",

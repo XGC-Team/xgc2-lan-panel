@@ -21,12 +21,15 @@ After the official XGC2 APT repository is configured:
 # robot
 sudo apt update
 sudo apt install xgc2-lan-beacon
+# Provision /etc/xgc2/lan-beacon.env with deployment TLS identity and
+# explicit caller grants before enabling its service.
 sudo systemctl enable --now xgc2-lan-beacon
 
 # laptop
 sudo apt update
 sudo apt install xgc2-lan-probe
-xgc2-lan-probe
+xgc2-lan-probe --tls-cert <client.pem> --tls-key <client-key.pem> \
+  --tls-ca <ca.pem> --beacon-grants <targets.json>
 # open http://127.0.0.1:3400/
 ```
 
@@ -38,7 +41,7 @@ beacon package, not a hard Depends of the probe.
 | Role | Port | Bind |
 | --- | ---: | --- |
 | Discovery UDP | **19518/udp** | robot listens; probe solicits from an ephemeral port |
-| Robot control HTTP | **19519/tcp** | all interfaces |
+| Robot control HTTPS with mTLS | **19519/tcp** | all interfaces |
 | Operator probe API + UI | **3400/tcp** | `127.0.0.1` |
 | Operator Vite (dev only) | **3401/tcp** | `127.0.0.1`, proxies `/api` to 3400 |
 
@@ -61,6 +64,13 @@ cd web && npm test && npm run build
 
 ## Trust
 
-Trusted-LAN field tool. Control HTTP has no authentication. Do not expose
-19519 to an untrusted network. Passwords never appear in beacons or probe
-logs.
+UDP discovery is an untrusted read-only hint. Control uses the native Go XRPC
+HTTPS host, verified client certificates and explicit caller SPKI grants.
+The probe additionally binds each permitted target ID to its deployment
+server DNS name and SPKI. A discovered robot without that grant cannot
+receive a command. The browser proxy accepts loopback Host and approved
+Origin values and requires JSON mutations. Passwords never appear in
+beacons or probe logs.
+
+See [the control and write contract](contracts/xrpc.md) for deployment
+inputs, native completion, bounded admission and remaining release gates.

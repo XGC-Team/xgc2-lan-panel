@@ -6,13 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 )
 
 const (
 	Kind         = "xgc2-lan-beacon"
 	KindSolicit  = "xgc2-lan-solicit"
-	Version      = 1
+	Version      = 2
 	UDPPort      = 19518
 	ControlPort  = 19519
 	ProbePort    = 3400
@@ -30,16 +31,18 @@ type Solicit struct {
 
 // Beacon is the robot's unicast reply to a solicit. control_port is the TCP apply port.
 type Beacon struct {
-	V            int      `json:"v"`
-	Kind         string   `json:"kind"`
-	ID           string   `json:"id"`
-	Hostname     string   `json:"hostname"`
-	TSUnixMS     int64    `json:"ts_unix_ms"`
-	ControlPort  int      `json:"control_port"`
-	DefaultIface string   `json:"default_iface,omitempty"`
-	SSHUser      string   `json:"ssh_user,omitempty"`
-	Users        []string `json:"users,omitempty"`
-	Ifaces       []Iface  `json:"ifaces"`
+	V               int      `json:"v"`
+	Kind            string   `json:"kind"`
+	ID              string   `json:"id"`
+	Hostname        string   `json:"hostname"`
+	TSUnixMS        int64    `json:"ts_unix_ms"`
+	ControlPort     int      `json:"control_port"`
+	ControlInstance string   `json:"control_instance"`
+	ControlName     string   `json:"control_name"`
+	DefaultIface    string   `json:"default_iface,omitempty"`
+	SSHUser         string   `json:"ssh_user,omitempty"`
+	Users           []string `json:"users,omitempty"`
+	Ifaces          []Iface  `json:"ifaces"`
 }
 
 // Iface is one NIC snapshot. DNS may be global (resolv.conf) repeated per row.
@@ -70,10 +73,14 @@ type ApplyRequest struct {
 
 // ApplyResult is returned after NetworkManager work.
 type ApplyResult struct {
-	OK      bool   `json:"ok"`
-	Gone    bool   `json:"gone,omitempty"`
-	Message string `json:"message,omitempty"`
-	Warning string `json:"warning,omitempty"`
+	OK             bool   `json:"ok"`
+	Applied        bool   `json:"applied"`
+	Persisted      bool   `json:"persisted"`
+	FailureStage   string `json:"failure_stage,omitempty"`
+	PartialEffects bool   `json:"partial_effects,omitempty"`
+	Gone           bool   `json:"gone,omitempty"`
+	Message        string `json:"message,omitempty"`
+	Warning        string `json:"warning,omitempty"`
 }
 
 func MarshalSolicit() ([]byte, error) {
@@ -115,11 +122,17 @@ func ParseBeacon(raw []byte) (Beacon, error) {
 	if b.V != Version {
 		return Beacon{}, fmt.Errorf("unsupported beacon version %d", b.V)
 	}
-	if b.ID == "" || b.Hostname == "" {
+	if len(raw) > MaxUDPBytes {
+		return Beacon{}, fmt.Errorf("beacon exceeds byte budget")
+	}
+	if b.ID == "" || b.Hostname == "" || len(b.ID) > 128 || len(b.Hostname) > 253 || b.ControlInstance == "" || len(b.ControlInstance) > 128 || b.ControlName == "" || len(b.ControlName) > 253 || strings.ContainsAny(b.ControlName, " /\\\x00\r\n:@") {
 		return Beacon{}, fmt.Errorf("beacon missing id or hostname")
 	}
 	if b.ControlPort == 0 {
 		b.ControlPort = ControlPort
+	}
+	if b.ControlPort < 1 || b.ControlPort > 65535 {
+		return Beacon{}, fmt.Errorf("invalid control port")
 	}
 	return b, nil
 }

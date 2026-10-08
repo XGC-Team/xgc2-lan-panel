@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/XGC-Team/xgc2-lan-panel/internal/protocol"
@@ -50,6 +51,9 @@ type Runner func(args []string) (string, error)
 func Validate(req protocol.ApplyRequest) error {
 	if !ifaceNameRe.MatchString(req.Iface) {
 		return fmt.Errorf("invalid iface")
+	}
+	if len(req.DNS) > 4 || len(req.Password) > 128 {
+		return fmt.Errorf("network input exceeds item/byte budget")
 	}
 	if req.SSID != "" && len(req.SSID) > 32 {
 		return fmt.Errorf("ssid too long")
@@ -158,7 +162,13 @@ func BuildPlan(req protocol.ApplyRequest, kind string, activeByIface map[string]
 			"ipv4.never-default", "no",
 		}})
 		seen := map[string]bool{profile: true}
-		for iface, name := range activeByIface {
+		ifaces := make([]string, 0, len(activeByIface))
+		for iface := range activeByIface {
+			ifaces = append(ifaces, iface)
+		}
+		sort.Strings(ifaces)
+		for _, iface := range ifaces {
+			name := activeByIface[iface]
 			if name == "" || seen[name] {
 				continue
 			}
@@ -170,6 +180,7 @@ func BuildPlan(req protocol.ApplyRequest, kind string, activeByIface map[string]
 				"connection", "modify", name,
 				"ipv4.route-metric", fmt.Sprintf("%d", demotedMetric),
 			}})
+			cmds = append(cmds, Command{Args: []string{"device", "reapply", iface}})
 		}
 	}
 
