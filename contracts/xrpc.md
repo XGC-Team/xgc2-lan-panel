@@ -89,7 +89,7 @@ The bounded <=16 KiB target manifest is:
 
 `GOPRIVATE=github.com/XGC-Team go test -race ./...` and
 `CGO_ENABLED=0 go build ./cmd/xgc2-lan-panel` pass with immutable SDK
-`v0.0.0-20261008183413-35c23b558399`, no local replace. Real native HTTPS tests
+`v0.0.0-20261008184950-0e742265600c`, no local replace. Real native HTTPS tests
 exercise CA/client verification, ungranted/anonymous caller rejection before
 effects, stale instance, deduplication, completion facts and wrong postcondition.
 Independent native TLS grant tests reject another valid same-CA server key

@@ -3,7 +3,7 @@ module github.com/XGC-Team/xgc2-lan-panel
 go 1.26.2
 
 require (
-	github.com/XGC-Team/xgc2-xrpc/go v0.0.0-20261008183413-35c23b558399
+	github.com/XGC-Team/xgc2-xrpc/go v0.0.0-20261008184950-0e742265600c
 	golang.org/x/sys v0.37.0
 )
 
