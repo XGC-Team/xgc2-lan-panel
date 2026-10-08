@@ -3,14 +3,11 @@
 package controltls
 
 import (
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/hex"
 	"errors"
 	"io"
 	"os"
-	"strings"
 	"syscall"
 )
 
@@ -78,28 +75,20 @@ func Server(base *tls.Config, callers []string) (*tls.Config, error) {
 	if base == nil || base.ClientCAs == nil || len(base.Certificates) != 1 {
 		return nil, errors.New("LAN server TLS identity and CA required")
 	}
-	if len(callers) == 0 || len(callers) > 64 {
-		return nil, errors.New("LAN control requires a bounded explicit caller grant")
-	}
-	grants := make(map[string]bool, len(callers))
-	for _, caller := range callers {
-		raw, err := hex.DecodeString(caller)
-		if err != nil || len(raw) != sha256.Size || caller != strings.ToLower(caller) {
-			return nil, errors.New("caller grant must be canonical SHA256 of certificate SPKI")
-		}
-		grants[caller] = true
+	grants, err := ParseCallerGrants(callers)
+	if err != nil {
+		return nil, err
 	}
 	config := base.Clone()
 	config.ClientAuth = tls.RequireAndVerifyClientCert
+	previous := config.VerifyConnection
 	config.VerifyConnection = func(state tls.ConnectionState) error {
-		if len(state.VerifiedChains) == 0 || len(state.PeerCertificates) == 0 {
-			return errors.New("authenticated LAN caller required")
+		if previous != nil {
+			if err := previous(state); err != nil {
+				return err
+			}
 		}
-		hash := sha256.Sum256(state.PeerCertificates[0].RawSubjectPublicKeyInfo)
-		if !grants[hex.EncodeToString(hash[:])] {
-			return errors.New("LAN caller has no control grant")
-		}
-		return nil
+		return grants.VerifyCaller(state)
 	}
 	return config, nil
 }
